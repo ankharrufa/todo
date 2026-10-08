@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks</title>
+<style>
+  :root {
+    --bg: #f4f3ef; --card: #fff; --text: #1d1d1b; --muted: #77756f;
+    --line: #e4e2db; --accent: #3a6ff7; --today: #fff7e0; --today-line: #f0c95a;
+    --danger: #d64545; --warn: #c27c0e; --ok: #2e8a4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --card: #22221f; --text: #ecebe6; --muted: #9a988f;
+      --line: #36352f; --accent: #7aa0ff; --today: #2d2918; --today-line: #8a6f22;
+      --danger: #ff6b6b; --warn: #f0b04a; --ok: #5cc184;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  button, input, select { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+
+  /* PIN screen */
+  #lock { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+  #lock form { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+               padding: 24px; width: 100%; max-width: 280px; text-align: center; }
+  #lock input { width: 100%; font-size: 28px; letter-spacing: 12px; text-align: center;
+                padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  #lockMsg { color: var(--danger); min-height: 1.4em; margin: 8px 0 0; font-size: 13px; }
+
+  /* Board */
+  header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; flex-wrap: wrap; }
+  header h1 { font-size: 18px; margin: 0; }
+  #week { color: var(--muted); }
+  #status { margin-left: auto; font-size: 12px; color: var(--muted); }
+  #status.err { color: var(--danger); }
+  .link { background: none; border: 0; padding: 0; color: var(--muted); cursor: pointer;
+          text-decoration: underline; font-size: 12px; }
+
+  #board { display: grid; gap: 12px; padding: 0 16px 24px;
+           grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 12px; display: flex; flex-direction: column; min-height: 140px; }
+  .card.today { background: var(--today); border-color: var(--today-line); }
+  .card.deadlines { border-top: 3px solid var(--danger); }
+  .card.over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+  .card h2 { font-size: 14px; margin: 0 0 8px; display: flex; justify-content: space-between; }
+  .card h2 small { color: var(--muted); font-weight: normal; }
+  ul { list-style: none; margin: 0; padding: 0; flex: 1; }
+  li { display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
+       border-bottom: 1px solid var(--line); }
+  li[draggable="true"] { cursor: grab; }
+  li.dragging { opacity: .4; }
+  li input[type=checkbox] { margin-top: 3px; width: 16px; height: 16px; flex: none; cursor: pointer; }
+  li .text { flex: 1; cursor: pointer; word-break: break-word; }
+  li.done .text { text-decoration: line-through; color: var(--muted); }
+  li .due { font-size: 12px; white-space: nowrap; color: var(--muted); }
+  li .due.soon { color: var(--warn); }
+  li .due.late { color: var(--danger); font-weight: 600; }
+
+  li.editing { flex-wrap: wrap; }
+  li.editing input[type=text] { flex: 1 1 100%; }
+  .edit-row { display: flex; gap: 6px; flex-wrap: wrap; width: 100%; }
+  input[type=text], input[type=date], select {
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--bg); min-width: 0; }
+  .btn { border: 1px solid var(--line); background: var(--bg); border-radius: 6px;
+         padding: 5px 10px; cursor: pointer; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.danger { color: var(--danger); }
+
+  form.add { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  form.add input[type=text] { flex: 1 1 120px; }
+  form.add input[type=date] { flex: 0 1 140px; }
+
+  @media (max-width: 560px) {
+    #board { grid-template-columns: 1fr; }
+    input[type=text], input[type=date], select { font-size: 16px; } /* stop iOS zoom */
+  }
+</style>
+</head>
+<body>
+
+<div id="lock">
+  <form id="lockForm">
+    <p style="margin-top:0">Enter PIN</p>
+    <input id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" autofocus>
+    <p id="lockMsg"></p>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>Tasks</h1>
+    <span id="week"></span>
+    <span id="status"></span>
+    <button class="link" id="logout" title="Forget the PIN on this device">Lock</button>
+  </header>
+  <main id="board"></main>
+</div>
+
+<script>
+const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const PIN_KEY = "tasks-pin";
+
+let pin = null;
+let state = { version: 0, tasks: [], deadlines: [] };
+let editing = null;          // id of the item currently being edited
+let saving = false, pending = false;
+
+// ---------- storage helpers (PIN only; tasks live on the server) ----------
+function loadPin() { try { return localStorage.getItem(PIN_KEY); } catch { return null; } }
+function storePin(p) { try { localStorage.setItem(PIN_KEY, p); } catch {} }
+function clearPin() { try { localStorage.removeItem(PIN_KEY); } catch {} }
+
+// ---------- dates ----------
+function weekStart(d = new Date()) {
+  const s = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  s.setDate(s.getDate() - ((s.getDay() + 6) % 7));
+  return s;
+}
+function todayIndex() { return (new Date().getDay() + 6) % 7; }
+function fmt(d) { return d.toLocaleDateString(undefined, { day: "numeric", month: "short" }); }
+function parseDate(str) { const [y, m, d] = str.split("-").map(Number); return new Date(y, m - 1, d); }
+
+// ---------- API ----------
+async function api(method, body) {
+  return fetch("/api/data", {
+    method,
+    headers: { "X-Pin": pin, "Content-Type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+function setStatus(text, isErr = false) {
+  const el = document.getElementById("status");
+  el.textContent = text;
+  el.className = isErr ? "err" : "";
+}
+
+async function unlock(p) {
+  pin = p;
+  const res = await api("GET").catch(() => null);
+  if (!res) return "Can't reach the server";
+  if (res.status === 401) return "Wrong PIN";
+  if (res.status === 429) return "Too many tries, wait an hour";
+  if (!res.ok) return "Server error";
+  storePin(p);
+  state = await res.json();
+  document.getElementById("lock").hidden = true;
+  document.getElementById("app").hidden = false;
+  cleanup();
+  render();
+  if (window.innerWidth <= 560) {
+    document.querySelector(".card.today")?.scrollIntoView({ block: "start" });
+  }
+  return null;
+}
+
+// Done tasks from before this week's Monday are gone for good.
+function cleanup() {
+  const start = weekStart().getTime();
+  const kept = state.tasks.filter(t => !t.done || new Date(t.doneAt).getTime() >= start);
+  if (kept.length !== state.tasks.length) { state.tasks = kept; commit(); }
+}
+
+// Apply a local change: re-render now, sync to the server in the background.
+function commit() { render(); pending = true; flush(); }
+
+async function flush() {
+  if (saving) return;
+  saving = true;
+  while (pending) {
+    pending = false;
+    setStatus("Saving…");
+    const res = await api("PUT", state).catch(() => null);
+    if (res && res.ok) {
+      state.version = (await res.json()).version;
+      setStatus("Saved");
+    } else if (res && res.status === 409) {
+      state = await res.json();
+      editing = null;
+      cleanup();
+      render();
+      setStatus("Changed on another device — reloaded, redo your last edit", true);
+    } else if (res && res.status === 401) {
+      clearPin(); location.reload(); return;
+    } else {
+      setStatus("Not saved — retrying…", true);
+      pending = true;
+      await new Promise(r => setTimeout(r, 4000));
+    }
+  }
+  saving = false;
+}
+
+// Pick up edits made on other devices when coming back to this tab.
+async function refresh() {
+  if (!pin || saving || pending || editing) return;
+  const res = await api("GET").catch(() => null);
+  if (!res || !res.ok) return;
+  const fresh = await res.json();
+  if (fresh.version !== state.version) { state = fresh; cleanup(); render(); }
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+
+// ---------- rendering ----------
+function el(tag, props = {}, ...children) {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const c of children) if (c != null) node.append(c);
+  return node;
+}
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+function render() {
+  const start = weekStart();
+  const end = new Date(start); end.setDate(end.getDate() + 6);
+  document.getElementById("week").textContent = `${fmt(start)} – ${fmt(end)}`;
+
+  const board = document.getElementById("board");
+  board.replaceChildren();
+  const today = todayIndex();
+
+  DAYS.forEach((name, i) => {
+    const date = new Date(start); date.setDate(date.getDate() + i);
+    const card = el("section", { className: "card" + (i === today ? " today" : "") });
+    card.append(el("h2", {}, name, el("small", { textContent: fmt(date) })));
+    const list = el("ul");
+    for (const t of state.tasks.filter(t => t.day === i)) list.append(taskRow(t));
+    card.append(list, addTaskForm(i));
+    makeDropZone(card, i);
+    board.append(card);
+  });
+
+  const dl = el("section", { className: "card deadlines" });
+  dl.append(el("h2", { textContent: "Deadlines" }));
+  const list = el("ul");
+  const sorted = [...state.deadlines].sort((a, b) =>
+    (a.date || "9999") < (b.date || "9999") ? -1 : (a.date || "9999") > (b.date || "9999") ? 1 : 0);
+  for (const d of sorted) list.append(deadlineRow(d));
+  dl.append(list, addDeadlineForm());
+  board.append(dl);
+
+  board.querySelector("li.editing input[type=text]")?.focus();
+}
+
+function taskRow(t) {
+  if (editing === t.id) return taskEditor(t);
+  const li = el("li", { className: t.done ? "done" : "", draggable: true });
+  const box = el("input", { type: "checkbox", checked: t.done, title: "Done" });
+  box.onchange = () => {
+    t.done = box.checked;
+    t.doneAt = t.done ? new Date().toISOString() : null;
+    commit();
+  };
+  const text = el("span", { className: "text", textContent: t.text, title: "Tap to edit" });
+  text.onclick = () => { editing = t.id; render(); };
+  li.ondragstart = e => { e.dataTransfer.setData("text/plain", t.id); li.classList.add("dragging"); };
+  li.ondragend = () => li.classList.remove("dragging");
+  li.append(box, text);
+  return li;
+}
+
+function taskEditor(t) {
+  const li = el("li", { className: "editing" });
+  const input = el("input", { type: "text", value: t.text });
+  const day = el("select", {}, ...DAYS.map((d, i) => el("option", { value: i, textContent: d, selected: i === t.day })));
+  const save = () => {
+    const v = input.value.trim();
+    if (v) { t.text = v; t.day = Number(day.value); }
+    editing = null; commit();
+  };
+  input.onkeydown = e => { if (e.key === "Enter") save(); if (e.key === "Escape") { editing = null; render(); } };
+  li.append(input, el("div", { className: "edit-row" },
+    day,
+    button("Save", "primary", save),
+    button("Cancel", "", () => { editing = null; render(); }),
+    button("Delete", "danger", () => {
+      state.tasks = state.tasks.filter(x => x.id !== t.id); editing = null; commit();
+    }),
+  ));
+  return li;
+}
+
+function addTaskForm(day) {
+  const input = el("input", { type: "text", placeholder: "Add task" });
+  const form = el("form", { className: "add" }, input);
+  form.onsubmit = e => {
+    e.preventDefault();
+    const v = input.value.trim();
+    if (!v) return;
+    state.tasks.push({ id: uid(), text: v, day, done: false, doneAt: null });
+    commit();
+    document.querySelectorAll("#board .card")[day].querySelector("form.add input").focus();
+  };
+  return form;
+}
+
+function makeDropZone(card, day) {
+  card.ondragover = e => { e.preventDefault(); card.classList.add("over"); };
+  card.ondragleave = e => { if (!card.contains(e.relatedTarget)) card.classList.remove("over"); };
+  card.ondrop = e => {
+    e.preventDefault();
+    card.classList.remove("over");
+    const t = state.tasks.find(x => x.id === e.dataTransfer.getData("text/plain"));
+    if (!t || t.day === day) return;
+    // Move to the end of the target day.
+    state.tasks = state.tasks.filter(x => x !== t);
+    t.day = day;
+    state.tasks.push(t);
+    commit();
+  };
+}
+
+function dueLabel(date) {
+  if (!date) return { text: "", cls: "" };
+  const days = Math.round((parseDate(date) - parseDate(new Date().toLocaleDateString("en-CA"))) / 86400000);
+  const when = fmt(parseDate(date));
+  if (days < 0) return { text: `${when} · ${-days}d late`, cls: "late" };
+  if (days === 0) return { text: `${when} · today`, cls: "late" };
+  if (days <= 3) return { text: `${when} · ${days}d`, cls: "soon" };
+  return { text: `${when} · ${days}d`, cls: "" };
+}
+
+function deadlineRow(d) {
+  if (editing === d.id) return deadlineEditor(d);
+  const li = el("li");
+  const box = el("input", { type: "checkbox", title: "Done (removes it)" });
+  box.onchange = () => { state.deadlines = state.deadlines.filter(x => x.id !== d.id); commit(); };
+  const text = el("span", { className: "text", textContent: d.text, title: "Tap to edit" });
+  text.onclick = () => { editing = d.id; render(); };
+  const due = dueLabel(d.date);
+  li.append(box, text, el("span", { className: "due " + due.cls, textContent: due.text }));
+  return li;
+}
+
+function deadlineEditor(d) {
+  const li = el("li", { className: "editing" });
+  const input = el("input", { type: "text", value: d.text });
+  const date = el("input", { type: "date", value: d.date || "" });
+  const save = () => {
+    const v = input.value.trim();
+    if (v) { d.text = v; d.date = date.value || null; }
+    editing = null; commit();
+  };
+  input.onkeydown = e => { if (e.key === "Enter") save(); if (e.key === "Escape") { editing = null; render(); } };
+  li.append(input, el("div", { className: "edit-row" },
+    date,
+    button("Save", "primary", save),
+    button("Cancel", "", () => { editing = null; render(); }),
+    button("Delete", "danger", () => {
+      state.deadlines = state.deadlines.filter(x => x.id !== d.id); editing = null; commit();
+    }),
+  ));
+  return li;
+}
+
+function addDeadlineForm() {
+  const input = el("input", { type: "text", placeholder: "Add deadline" });
+  const date = el("input", { type: "date" });
+  const form = el("form", { className: "add" }, input, date, el("button", { className: "btn", textContent: "Add" }));
+  form.onsubmit = e => {
+    e.preventDefault();
+    const v = input.value.trim();
+    if (!v) return;
+    state.deadlines.push({ id: uid(), text: v, date: date.value || null });
+    commit();
+  };
+  return form;
+}
+
+function button(label, cls, onclick) {
+  return el("button", { type: "button", className: "btn " + cls, textContent: label, onclick });
+}
+
+// ---------- start ----------
+document.getElementById("logout").onclick = () => { clearPin(); location.reload(); };
+
+document.getElementById("pin").oninput = async e => {
+  const v = e.target.value.replace(/\D/g, "");
+  e.target.value = v;
+  if (v.length === 4) {
+    const err = await unlock(v);
+    if (err) { document.getElementById("lockMsg").textContent = err; e.target.value = ""; }
+  }
+};
+document.getElementById("lockForm").onsubmit = e => e.preventDefault();
+
+const saved = loadPin();
+if (saved) unlock(saved).then(err => { if (err) clearPin(); });
+</script>
+</body>
+</html>
