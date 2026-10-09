@@ -1,1 +1,11 @@
+# macOS
 .DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local tooling (not needed for the site)
+node_modules/
+.claude/
