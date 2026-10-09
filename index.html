@@ -23,11 +23,11 @@
   button, input, select { font: inherit; color: inherit; }
   [hidden] { display: none !important; }
 
-  /* PIN screen */
+  /* Passphrase screen */
   #lock { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
   #lock form { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
                padding: 24px; width: 100%; max-width: 280px; text-align: center; }
-  #lock input { width: 100%; font-size: 28px; letter-spacing: 12px; text-align: center;
+  #lock input { width: 100%; font-size: 18px; text-align: center; margin-bottom: 8px;
                 padding: 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
   #lockMsg { color: var(--danger); min-height: 1.4em; margin: 8px 0 0; font-size: 13px; }
 
@@ -85,8 +85,9 @@
 
 <div id="lock">
   <form id="lockForm">
-    <p style="margin-top:0">Enter PIN</p>
-    <input id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" autofocus>
+    <p style="margin-top:0">Enter passphrase</p>
+    <input id="pass" type="password" autocomplete="current-password" autofocus>
+    <button class="btn primary" id="unlockBtn">Unlock</button>
     <p id="lockMsg"></p>
   </form>
 </div>
@@ -96,24 +97,27 @@
     <h1>Tasks</h1>
     <span id="week"></span>
     <span id="status"></span>
-    <button class="link" id="logout" title="Forget the PIN on this device">Lock</button>
+    <button class="link" id="logout" title="Forget the passphrase on this device">Lock</button>
   </header>
   <main id="board"></main>
 </div>
 
+<script src="crypto.js"></script>
+<script src="config.js"></script>
 <script>
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-const PIN_KEY = "tasks-pin";
+const CREDS_KEY = "tasks-creds";
+const FILE = "tasks.json";
 
-let pin = null;
+let creds = null;            // { token, gistId }, decrypted from config.js
 let state = { version: 0, tasks: [], deadlines: [] };
 let editing = null;          // id of the item currently being edited
 let saving = false, pending = false;
 
-// ---------- storage helpers (PIN only; tasks live on the server) ----------
-function loadPin() { try { return localStorage.getItem(PIN_KEY); } catch { return null; } }
-function storePin(p) { try { localStorage.setItem(PIN_KEY, p); } catch {} }
-function clearPin() { try { localStorage.removeItem(PIN_KEY); } catch {} }
+// ---------- this device remembers the unlocked credentials ----------
+function loadCreds() { try { return JSON.parse(localStorage.getItem(CREDS_KEY)); } catch { return null; } }
+function storeCreds(c) { try { localStorage.setItem(CREDS_KEY, JSON.stringify(c)); } catch {} }
+function clearCreds() { try { localStorage.removeItem(CREDS_KEY); } catch {} }
 
 // ---------- dates ----------
 function weekStart(d = new Date()) {
@@ -125,13 +129,27 @@ function todayIndex() { return (new Date().getDay() + 6) % 7; }
 function fmt(d) { return d.toLocaleDateString(undefined, { day: "numeric", month: "short" }); }
 function parseDate(str) { const [y, m, d] = str.split("-").map(Number); return new Date(y, m - 1, d); }
 
-// ---------- API ----------
-async function api(method, body) {
-  return fetch("/api/data", {
+// ---------- GitHub Gist ----------
+// The whole board is one JSON file in a secret gist. Throws { status } on failure.
+async function gist(method, body) {
+  const res = await fetch(`https://api.github.com/gists/${creds.gistId}`, {
     method,
-    headers: { "X-Pin": pin, "Content-Type": "application/json" },
+    cache: "no-store",
+    headers: { Authorization: `Bearer ${creds.token}`, Accept: "application/vnd.github+json" },
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (!res.ok) throw { status: res.status };
+  return res.json();
+}
+
+async function readBoard() {
+  const g = await gist("GET");
+  const data = JSON.parse(g.files[FILE]?.content || "{}");
+  return { version: data.version || 0, tasks: data.tasks || [], deadlines: data.deadlines || [] };
+}
+
+function writeBoard(board) {
+  return gist("PATCH", { files: { [FILE]: { content: JSON.stringify(board, null, 1) } } });
 }
 
 function setStatus(text, isErr = false) {
@@ -140,15 +158,15 @@ function setStatus(text, isErr = false) {
   el.className = isErr ? "err" : "";
 }
 
-async function unlock(p) {
-  pin = p;
-  const res = await api("GET").catch(() => null);
-  if (!res) return "Can't reach the server";
-  if (res.status === 401) return "Wrong PIN";
-  if (res.status === 429) return "Too many tries, wait an hour";
-  if (!res.ok) return "Server error";
-  storePin(p);
-  state = await res.json();
+async function unlock(c) {
+  creds = c;
+  try {
+    state = await readBoard();
+  } catch (e) {
+    if (e.status === 401 || e.status === 404) return "GitHub refused the token (expired or deleted?). Re-run setup.";
+    return "Can't reach GitHub";
+  }
+  storeCreds(c);
   document.getElementById("lock").hidden = true;
   document.getElementById("app").hidden = false;
   cleanup();
@@ -166,28 +184,34 @@ function cleanup() {
   if (kept.length !== state.tasks.length) { state.tasks = kept; commit(); }
 }
 
-// Apply a local change: re-render now, sync to the server in the background.
+// Apply a local change: re-render now, sync to GitHub in the background.
 function commit() { render(); pending = true; flush(); }
 
+// Each save first checks the gist's version. If another device saved since we
+// last loaded, take theirs instead of overwriting it. (A remote version lower
+// than ours is just GitHub returning a slightly stale copy, so ignore it.)
 async function flush() {
   if (saving) return;
   saving = true;
   while (pending) {
     pending = false;
     setStatus("Saving…");
-    const res = await api("PUT", state).catch(() => null);
-    if (res && res.ok) {
-      state.version = (await res.json()).version;
+    try {
+      const remote = await readBoard();
+      if (remote.version > state.version) {
+        state = remote;
+        editing = null;
+        cleanup();
+        render();
+        setStatus("Changed on another device — reloaded, redo your last edit", true);
+        continue;
+      }
+      const next = { ...state, version: state.version + 1 };
+      await writeBoard(next);
+      state.version = next.version;
       setStatus("Saved");
-    } else if (res && res.status === 409) {
-      state = await res.json();
-      editing = null;
-      cleanup();
-      render();
-      setStatus("Changed on another device — reloaded, redo your last edit", true);
-    } else if (res && res.status === 401) {
-      clearPin(); location.reload(); return;
-    } else {
+    } catch (e) {
+      if (e.status === 401) { clearCreds(); location.reload(); return; }
       setStatus("Not saved — retrying…", true);
       pending = true;
       await new Promise(r => setTimeout(r, 4000));
@@ -198,11 +222,11 @@ async function flush() {
 
 // Pick up edits made on other devices when coming back to this tab.
 async function refresh() {
-  if (!pin || saving || pending || editing) return;
-  const res = await api("GET").catch(() => null);
-  if (!res || !res.ok) return;
-  const fresh = await res.json();
-  if (fresh.version !== state.version) { state = fresh; cleanup(); render(); }
+  if (!creds || saving || pending || editing) return;
+  try {
+    const fresh = await readBoard();
+    if (fresh.version > state.version) { state = fresh; cleanup(); render(); }
+  } catch {}
 }
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
 
@@ -376,20 +400,22 @@ function button(label, cls, onclick) {
 }
 
 // ---------- start ----------
-document.getElementById("logout").onclick = () => { clearPin(); location.reload(); };
+document.getElementById("logout").onclick = () => { clearCreds(); location.reload(); };
 
-document.getElementById("pin").oninput = async e => {
-  const v = e.target.value.replace(/\D/g, "");
-  e.target.value = v;
-  if (v.length === 4) {
-    const err = await unlock(v);
-    if (err) { document.getElementById("lockMsg").textContent = err; e.target.value = ""; }
-  }
+document.getElementById("lockForm").onsubmit = async e => {
+  e.preventDefault();
+  const msg = document.getElementById("lockMsg");
+  const input = document.getElementById("pass");
+  if (!window.TASKS_CONFIG) { msg.textContent = "Not set up yet: run setup.html and upload config.js"; return; }
+  msg.textContent = "Unlocking…";
+  let c;
+  try { c = await decryptConfig(window.TASKS_CONFIG, input.value); }
+  catch { msg.textContent = "Wrong passphrase"; input.value = ""; return; }
+  msg.textContent = (await unlock(c)) || "";
 };
-document.getElementById("lockForm").onsubmit = e => e.preventDefault();
 
-const saved = loadPin();
-if (saved) unlock(saved).then(err => { if (err) clearPin(); });
+const saved = loadCreds();
+if (saved) unlock(saved).then(err => { if (err) { clearCreds(); document.getElementById("lockMsg").textContent = err; } });
 </script>
 </body>
 </html>

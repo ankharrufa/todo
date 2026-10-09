@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks setup</title>
+<style>
+  :root { --bg: #f4f3ef; --card: #fff; --text: #1d1d1b; --muted: #77756f; --line: #e4e2db;
+          --accent: #3a6ff7; --danger: #d64545; --ok: #2e8a4f; --warn: #c27c0e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --card: #22221f; --text: #ecebe6; --muted: #9a988f; --line: #36352f;
+            --accent: #7aa0ff; --danger: #ff6b6b; --ok: #5cc184; --warn: #f0b04a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); padding: 16px;
+         font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; background: var(--card); border: 1px solid var(--line);
+         border-radius: 12px; padding: 20px; }
+  h1 { font-size: 20px; margin-top: 0; }
+  label { display: block; font-weight: 600; margin-top: 14px; }
+  label small { font-weight: normal; color: var(--muted); display: block; }
+  input, textarea { width: 100%; font: inherit; color: inherit; background: var(--bg);
+                    border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-top: 4px; }
+  textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; height: 90px; }
+  button { font: inherit; border: 1px solid var(--accent); background: var(--accent); color: #fff;
+           border-radius: 6px; padding: 8px 14px; margin-top: 16px; cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  #msg { margin-top: 12px; }
+  .err { color: var(--danger); } .ok { color: var(--ok); } .warn { color: var(--warn); }
+  .note { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Tasks setup</h1>
+  <p class="note">This page runs only in your browser. Your token is sent to GitHub (to check it
+  and to create the gist) and nowhere else. The passphrase never leaves this device.</p>
+
+  <form id="form">
+    <label>GitHub token
+      <small>Classic token with only the <b>gist</b> scope.</small>
+      <input id="token" type="password" autocomplete="off" required>
+    </label>
+    <label>Gist ID or URL (optional)
+      <small>Leave empty and a new secret gist is created for you.</small>
+      <input id="gist" autocomplete="off">
+    </label>
+    <label>Passphrase
+      <small>What you'll type once on each device. Four random words is ideal.</small>
+      <input id="pass" type="password" autocomplete="new-password" required>
+    </label>
+    <label>Passphrase again
+      <input id="pass2" type="password" autocomplete="new-password" required>
+    </label>
+    <p id="strength" class="note"></p>
+    <button id="go">Create config.js</button>
+  </form>
+
+  <p id="msg"></p>
+
+  <div id="out" hidden>
+    <label>config.js
+      <small>Upload this file to the repo, replacing the existing config.js.</small>
+      <textarea id="code" readonly></textarea>
+    </label>
+    <button id="download" type="button">Download config.js</button>
+  </div>
+</main>
+
+<script src="crypto.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const EMPTY_BOARD = JSON.stringify({ version: 0, tasks: [], deadlines: [] });
+
+$("pass").oninput = () => {
+  const p = $("pass").value;
+  const s = $("strength");
+  if (!p) s.textContent = "";
+  else if (p.length < 6) { s.textContent = "Too short (6 characters minimum)."; s.className = "err"; }
+  else if (/^\d+$/.test(p)) {
+    s.textContent = "Digits only: fine against casual snooping, but someone determined could guess it in minutes.";
+    s.className = "warn";
+  } else if (p.length < 16) { s.textContent = "OK. Longer (e.g. four words) is stronger."; s.className = "note"; }
+  else { s.textContent = "Strong."; s.className = "ok"; }
+};
+
+function say(text, cls = "") { $("msg").textContent = text; $("msg").className = cls; }
+
+async function github(token, method, path, body) {
+  const res = await fetch("https://api.github.com" + path, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(
+    res.status === 401 ? "GitHub rejected the token." :
+    res.status === 404 ? "Gist not found (or the token lacks the gist scope)." :
+    `GitHub error ${res.status}.`);
+  return res.json();
+}
+
+$("form").onsubmit = async e => {
+  e.preventDefault();
+  const token = $("token").value.trim();
+  const pass = $("pass").value;
+  if (pass.length < 6) return say("Passphrase must be at least 6 characters.", "err");
+  if (pass !== $("pass2").value) return say("The two passphrases don't match.", "err");
+  let gistId = $("gist").value.trim().split("/").filter(Boolean).pop() || "";
+
+  $("go").disabled = true;
+  try {
+    if (gistId) {
+      say("Checking the gist…");
+      const g = await github(token, "GET", `/gists/${gistId}`);
+      if (!g.files["tasks.json"]) {
+        await github(token, "PATCH", `/gists/${gistId}`, { files: { "tasks.json": { content: EMPTY_BOARD } } });
+      }
+    } else {
+      say("Creating a secret gist…");
+      const g = await github(token, "POST", "/gists", {
+        description: "Task board data", public: false,
+        files: { "tasks.json": { content: EMPTY_BOARD } },
+      });
+      gistId = g.id;
+    }
+    say("Encrypting…");
+    const blob = await encryptConfig({ token, gistId }, pass);
+    $("code").value =
+      "// Generated by setup.html: GitHub token + gist id, encrypted with your passphrase.\n" +
+      `window.TASKS_CONFIG = "${blob}";\n`;
+    $("out").hidden = false;
+    say(`Done. Gist ${gistId} is ready.`, "ok");
+  } catch (err) {
+    say(err.message || "Something went wrong.", "err");
+  }
+  $("go").disabled = false;
+};
+
+$("download").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([$("code").value], { type: "text/javascript" }));
+  a.download = "config.js";
+  a.click();
+};
+</script>
+</body>
+</html>
