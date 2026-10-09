@@ -97,6 +97,7 @@
     <h1>Tasks</h1>
     <span id="week"></span>
     <span id="status"></span>
+    <button class="link" id="sync" title="Check for changes now">↻ Refresh</button>
     <button class="link" id="logout" title="Forget the passphrase on this device">Lock</button>
   </header>
   <main id="board"></main>
@@ -132,7 +133,8 @@ function parseDate(str) { const [y, m, d] = str.split("-").map(Number); return n
 // ---------- GitHub Gist ----------
 // The whole board is one JSON file in a secret gist. Throws { status } on failure.
 async function gist(method, body) {
-  const res = await fetch(`https://api.github.com/gists/${creds.gistId}`, {
+  const fresh = method === "GET" ? `?t=${Date.now()}` : "";
+  const res = await fetch(`https://api.github.com/gists/${creds.gistId}${fresh}`, {
     method,
     cache: "no-store",
     headers: { Authorization: `Bearer ${creds.token}`, Accept: "application/vnd.github+json" },
@@ -220,15 +222,24 @@ async function flush() {
   saving = false;
 }
 
-// Pick up edits made on other devices when coming back to this tab.
+// Pick up edits made on other devices: every 20s while the page is visible,
+// and straight away when coming back to it or tapping ↻.
+const POLL_MS = 20000;
 async function refresh() {
   if (!creds || saving || pending || editing) return;
   try {
     const fresh = await readBoard();
     if (fresh.version > state.version) { state = fresh; cleanup(); render(); }
-  } catch {}
+    setStatus("Synced " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+  } catch {
+    setStatus("Offline — will retry", true);
+  }
 }
+setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
 document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+window.addEventListener("focus", refresh);
+window.addEventListener("pageshow", refresh);
+window.addEventListener("online", refresh);
 
 // ---------- rendering ----------
 function el(tag, props = {}, ...children) {
@@ -400,6 +411,7 @@ function button(label, cls, onclick) {
 }
 
 // ---------- start ----------
+document.getElementById("sync").onclick = refresh;
 document.getElementById("logout").onclick = () => { clearCreds(); location.reload(); };
 
 document.getElementById("lockForm").onsubmit = async e => {
