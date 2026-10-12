@@ -41,6 +41,7 @@
           padding: 12px; display: flex; flex-direction: column; min-height: 140px; }
   .card.today { background: var(--today); border-color: var(--today-line); }
   .card.deadlines { border-top: 3px solid var(--danger); }
+  .card.scratch { grid-column: 1 / -1; min-height: 0; border-top: 3px solid var(--accent); }
   .card.over { outline: 2px dashed var(--accent); outline-offset: -2px; }
   .card h2 { font-size: 14px; margin: 0 0 8px; display: flex; justify-content: space-between; }
   .card h2 small { color: var(--muted); font-weight: normal; }
@@ -102,6 +103,7 @@
 <script src="config.js"></script>
 <script>
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+const SCRATCH = -1;          // task.day for the scratch pad (not tied to a day)
 const CREDS_KEY = "tasks-creds";
 const FILE = "tasks.json";
 
@@ -174,10 +176,14 @@ async function unlock(c) {
   return null;
 }
 
-// Done tasks from before this week's Monday are gone for good.
+// Done tasks disappear for good: scratch pad ones at the start of each day,
+// day ones at the start of each week (Monday).
 function cleanup() {
-  const start = weekStart().getTime();
-  const kept = state.tasks.filter(t => !t.done || new Date(t.doneAt).getTime() >= start);
+  const now = new Date();
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const week = weekStart().getTime();
+  const kept = state.tasks.filter(t =>
+    !t.done || new Date(t.doneAt).getTime() >= (t.day === SCRATCH ? dayStart : week));
   if (kept.length !== state.tasks.length) { state.tasks = kept; commit(); }
 }
 
@@ -253,9 +259,19 @@ function render() {
   board.replaceChildren();
   const today = todayIndex();
 
+  const scratch = el("section", { className: "card scratch" });
+  scratch.dataset.day = SCRATCH;
+  scratch.append(el("h2", {}, "Scratch pad", el("small", { textContent: "done items clear each day" })));
+  const sList = el("ul");
+  for (const t of state.tasks.filter(t => t.day === SCRATCH)) sList.append(taskRow(t));
+  scratch.append(sList, addTaskForm(SCRATCH));
+  makeDropZone(scratch, SCRATCH);
+  board.append(scratch);
+
   DAYS.forEach((name, i) => {
     const date = new Date(start); date.setDate(date.getDate() + i);
     const card = el("section", { className: "card" + (i === today ? " today" : "") });
+    card.dataset.day = i;
     card.append(el("h2", {}, name, el("small", { textContent: fmt(date) })));
     const list = el("ul");
     for (const t of state.tasks.filter(t => t.day === i)) list.append(taskRow(t));
@@ -271,6 +287,7 @@ function render() {
     (a.date || "9999") < (b.date || "9999") ? -1 : (a.date || "9999") > (b.date || "9999") ? 1 : 0);
   for (const d of sorted) list.append(deadlineRow(d));
   dl.append(list, addDeadlineForm());
+  makeDropZone(dl, "deadlines");
   board.append(dl);
 
   board.querySelector("li.editing input[type=text]")?.focus();
@@ -296,10 +313,13 @@ function taskRow(t) {
 function taskEditor(t) {
   const li = el("li", { className: "editing" });
   const input = el("input", { type: "text", value: t.text });
-  const day = el("select", {}, ...DAYS.map((d, i) => el("option", { value: i, textContent: d, selected: i === t.day })));
+  const day = el("select", {},
+    el("option", { value: SCRATCH, textContent: "Scratch pad", selected: t.day === SCRATCH }),
+    ...DAYS.map((d, i) => el("option", { value: i, textContent: d, selected: i === t.day })),
+    el("option", { value: "deadlines", textContent: "Deadlines" }));
   const save = () => {
     const v = input.value.trim();
-    if (v) { t.text = v; t.day = Number(day.value); }
+    if (v) { t.text = v; moveTask(t, day.value === "deadlines" ? "deadlines" : Number(day.value)); }
     editing = null; commit();
   };
   input.onkeydown = e => { if (e.key === "Enter") save(); if (e.key === "Escape") { editing = null; render(); } };
@@ -323,7 +343,7 @@ function addTaskForm(day) {
     if (!v) return;
     state.tasks.push({ id: uid(), text: v, day, done: false, doneAt: null });
     commit();
-    document.querySelectorAll("#board .card")[day].querySelector("form.add input").focus();
+    document.querySelector(`#board .card[data-day="${day}"] form.add input`).focus();
   };
   return form;
 }
@@ -336,12 +356,22 @@ function makeDropZone(card, day) {
     card.classList.remove("over");
     const t = state.tasks.find(x => x.id === e.dataTransfer.getData("text/plain"));
     if (!t || t.day === day) return;
-    // Move to the end of the target day.
-    state.tasks = state.tasks.filter(x => x !== t);
-    t.day = day;
-    state.tasks.push(t);
+    moveTask(t, day);
     commit();
   };
+}
+
+// Move a task to the end of another card: a day, the scratch pad, or
+// "deadlines" (where it becomes an undated deadline).
+function moveTask(t, target) {
+  if (t.day === target) return;
+  state.tasks = state.tasks.filter(x => x !== t);
+  if (target === "deadlines") {
+    state.deadlines.push({ id: t.id, text: t.text, date: null });
+  } else {
+    t.day = target;
+    state.tasks.push(t);
+  }
 }
 
 function dueLabel(date) {

@@ -6,9 +6,11 @@ the data is one JSON file (`tasks.json`) in a secret GitHub Gist.
 - Done tasks stay struck through for the rest of the week; done tasks from
   previous weeks are deleted the next time the page is opened.
 - Unfinished tasks carry over to the same weekday.
+- The scratch pad at the top holds short-term items not tied to a day; done
+  ones are deleted at the start of the next day.
 - Ticking a deadline removes it.
-- Tap a task to edit it, move it to another day, or delete it. On a laptop
-  you can also drag tasks between days.
+- Tap a task to edit it, move it to another card (scratch pad, a day, or
+  Deadlines), or delete it. On a laptop you can also drag tasks between cards.
 
 ## How access works
 
