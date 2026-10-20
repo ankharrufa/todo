@@ -10,7 +10,9 @@ the data is one JSON file (`tasks.json`) in a secret GitHub Gist.
   ones are deleted at the start of the next day.
 - Ticking a deadline removes it.
 - Tap a task to edit it, move it to another card (scratch pad, a day, or
-  Deadlines), or delete it. On a laptop you can also drag tasks between cards.
+  Deadlines), reorder it with ↑ / ↓, or delete it. On a laptop you can also
+  drag tasks: drop on a task to place it above that one, or on a card to add
+  it at the end.
 
 ## How access works
 

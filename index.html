@@ -50,6 +50,7 @@
        border-bottom: 1px solid var(--line); }
   li[draggable="true"] { cursor: grab; }
   li.dragging { opacity: .4; }
+  li.drop-before { box-shadow: 0 -2px 0 var(--accent); }
   li input[type=checkbox] { margin-top: 3px; width: 16px; height: 16px; flex: none; cursor: pointer; }
   li .text { flex: 1; cursor: pointer; word-break: break-word; }
   li.done .text { text-decoration: line-through; color: var(--muted); }
@@ -290,7 +291,6 @@ function render() {
   makeDropZone(dl, "deadlines");
   board.append(dl);
 
-  board.querySelector("li.editing input[type=text]")?.focus();
 }
 
 function taskRow(t) {
@@ -303,9 +303,22 @@ function taskRow(t) {
     commit();
   };
   const text = el("span", { className: "text", textContent: t.text, title: "Tap to edit" });
-  text.onclick = () => { editing = t.id; render(); };
+  text.onclick = () => startEditing(t.id);
   li.ondragstart = e => { e.dataTransfer.setData("text/plain", t.id); li.classList.add("dragging"); };
   li.ondragend = () => li.classList.remove("dragging");
+  li.ondragover = e => { e.preventDefault(); li.classList.add("drop-before"); };
+  li.ondragleave = () => li.classList.remove("drop-before");
+  li.ondrop = e => {
+    e.preventDefault();
+    e.stopPropagation();
+    li.closest(".card").classList.remove("over");
+    const moved = state.tasks.find(x => x.id === e.dataTransfer.getData("text/plain"));
+    if (!moved || moved === t) return render();
+    state.tasks = state.tasks.filter(x => x !== moved);
+    moved.day = t.day;
+    state.tasks.splice(state.tasks.indexOf(t), 0, moved);
+    commit();
+  };
   li.append(box, text);
   return li;
 }
@@ -323,8 +336,15 @@ function taskEditor(t) {
     editing = null; commit();
   };
   input.onkeydown = e => { if (e.key === "Enter") save(); if (e.key === "Escape") { editing = null; render(); } };
+  const shift = dir => {
+    const v = input.value.trim();
+    if (v) t.text = v;
+    shiftTask(t, dir);
+  };
   li.append(input, el("div", { className: "edit-row" },
     day,
+    button("↑", "", () => shift(-1)),
+    button("↓", "", () => shift(1)),
     button("Save", "primary", save),
     button("Cancel", "", () => { editing = null; render(); }),
     button("Delete", "danger", () => {
@@ -332,6 +352,22 @@ function taskEditor(t) {
     }),
   ));
   return li;
+}
+
+function startEditing(id) {
+  editing = id;
+  render();
+  document.querySelector("li.editing input[type=text]")?.focus();
+}
+
+// Swap a task with its neighbour above (dir -1) or below (+1) in the same card.
+function shiftTask(t, dir) {
+  const same = state.tasks.filter(x => x.day === t.day);
+  const other = same[same.indexOf(t) + dir];
+  if (!other) return;
+  const i = state.tasks.indexOf(t), j = state.tasks.indexOf(other);
+  [state.tasks[i], state.tasks[j]] = [state.tasks[j], state.tasks[i]];
+  commit();
 }
 
 function addTaskForm(day) {
@@ -390,7 +426,7 @@ function deadlineRow(d) {
   const box = el("input", { type: "checkbox", title: "Done (removes it)" });
   box.onchange = () => { state.deadlines = state.deadlines.filter(x => x.id !== d.id); commit(); };
   const text = el("span", { className: "text", textContent: d.text, title: "Tap to edit" });
-  text.onclick = () => { editing = d.id; render(); };
+  text.onclick = () => startEditing(d.id);
   const due = dueLabel(d.date);
   li.append(box, text, el("span", { className: "due " + due.cls, textContent: due.text }));
   return li;
